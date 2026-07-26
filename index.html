@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>Bodensee Häfen</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+
+  header {
+    background: #0b3d5c;
+    color: white;
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    z-index: 1000;
+  }
+  header h1 { font-size: 1.1rem; margin: 0; white-space: nowrap; }
+  #search {
+    flex: 1;
+    min-width: 150px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: none;
+    font-size: 1rem;
+  }
+  #refreshBtn, #closeDetail {
+    background: #135a86;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 1rem;
+    cursor: pointer;
+  }
+  #refreshBtn:hover, #closeDetail:hover { background: #1a72a8; }
+  #status { font-size: 0.75rem; color: #cfe4f2; width: 100%; }
+
+  #main {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  #list {
+    width: 300px;
+    overflow-y: auto;
+    border-right: 1px solid #ddd;
+    background: #f7f9fa;
+  }
+  #list .item {
+    padding: 10px 12px;
+    border-bottom: 1px solid #e6e6e6;
+    cursor: pointer;
+  }
+  #list .item:hover { background: #e9f2f8; }
+  #list .item .name { font-weight: 600; color: #0b3d5c; }
+  #list .item .sub { font-size: 0.8rem; color: #555; }
+  #list .empty { padding: 16px; color: #777; font-size: 0.9rem; }
+
+  #map { flex: 1; }
+
+  #detail {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    background: white;
+    border-top: 3px solid #0b3d5c;
+    box-shadow: 0 -4px 16px rgba(0,0,0,0.2);
+    padding: 16px;
+    max-height: 55vh;
+    overflow-y: auto;
+    transform: translateY(100%);
+    transition: transform 0.25s ease;
+    z-index: 2000;
+  }
+  #detail.open { transform: translateY(0); }
+  #detail h2 { margin: 0 0 8px 0; color: #0b3d5c; }
+  #detail .row { margin: 6px 0; font-size: 0.95rem; }
+  #detail .label { font-weight: 600; color: #333; }
+  #detail a { color: #135a86; }
+  #detailHeader { display: flex; justify-content: space-between; align-items: flex-start; }
+
+  #errorBanner {
+    display: none;
+    background: #fff3cd;
+    color: #7a5b00;
+    padding: 10px 14px;
+    font-size: 0.85rem;
+    border-bottom: 1px solid #f0e0a0;
+  }
+  #errorBanner a { color: #7a5b00; }
+
+  @media (max-width: 700px) {
+    #main { flex-direction: column; }
+    #list { width: 100%; height: 40%; border-right: none; border-top: 1px solid #ddd; order: 2; }
+    #map { height: 60%; order: 1; }
+    #detail { max-height: 70vh; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>⛵ Bodensee Häfen</h1>
+    <input id="search" type="text" placeholder="Hafen suchen..." />
+    <button id="refreshBtn" title="Daten neu laden">🔄 Aktualisieren</button>
+    <div id="status">Lade Daten…</div>
+  </header>
+  <div id="errorBanner"></div>
+  <div id="main">
+    <aside id="list"><div class="empty">Lade Häfen…</div></aside>
+    <div id="map"></div>
+  </div>
+  <div id="detail"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script>
+/* ============================================================
+   KONFIGURATION
+   1. Google Sheet erstellen und Hafendaten-Vorlage importieren
+   2. Sheet freigeben: "Jeder mit Link" -> "Bearbeiter"
+   3. Sheet-ID aus der URL kopieren (zwischen /d/ und /edit)
+      Beispiel-URL: https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOp/edit
+                                                         ^^^^^^^^^^^^^^^^^^ das ist die ID
+   4. Hier eintragen:
+   ============================================================ */
+const SHEET_ID = "1kkk9XfdFXDubv9m65SSQmtUbu4KAZ6ZjoMVmmiV8kqg";
+const GID = "0"; // 0 = erstes Tabellenblatt, sonst gid aus der URL (...#gid=123456)
+/* ============================================================ */
+
+const CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&gid=${GID}`;
+
+const map = L.map('map').setView([47.62, 9.35], 10);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 18,
+  attribution: '&copy; OpenStreetMap-Mitwirkende'
+}).addTo(map);
+
+let harbors = [];
+let markers = [];
+const listEl = document.getElementById('list');
+const detailEl = document.getElementById('detail');
+const statusEl = document.getElementById('status');
+const errorEl = document.getElementById('errorBanner');
+const searchEl = document.getElementById('search');
+
+function showError(msg) {
+  errorEl.innerHTML = msg;
+  errorEl.style.display = 'block';
+}
+function hideError() {
+  errorEl.style.display = 'none';
+}
+
+async function loadData() {
+  statusEl.textContent = 'Lade Daten…';
+  hideError();
+
+  if (SHEET_ID === "HIER_DEINE_SHEET_ID_EINFUEGEN") {
+    showError('⚠️ Noch kein Google Sheet verbunden. Trage die SHEET_ID im Code (Zeile mit <code>const SHEET_ID</code>) ein. Siehe Anleitung (README).');
+    statusEl.textContent = 'Nicht verbunden';
+    renderList([]);
+    return;
+  }
+
+  try {
+    const res = await fetch(CSV_URL, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const text = await res.text();
+    const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+    harbors = parsed.data
+      .map(r => ({
+        name: (r['Hafenname'] || '').trim(),
+        land: (r['Land'] || '').trim(),
+        lat: parseFloat(String(r['Latitude']).replace(',', '.')),
+        lon: parseFloat(String(r['Longitude']).replace(',', '.')),
+        telefon: (r['Telefon Hafenmeister'] || '').trim(),
+        reservierung: (r['Reservierung'] || '').trim(),
+        reservierungslink: (r['Reservierungslink'] || '').trim(),
+        tiefe: (r['Wassertiefe (m)'] || '').trim(),
+        tiefeUpdate: (r['Letztes Update Wassertiefe'] || '').trim(),
+        notizen: (r['Notizen'] || '').trim(),
+        eingetragenVon: (r['Eingetragen von'] || '').trim(),
+      }))
+      .filter(h => h.name);
+
+    renderMarkers();
+    renderList(harbors);
+    statusEl.textContent = `${harbors.length} Häfen · zuletzt geladen ${new Date().toLocaleTimeString('de-DE')}`;
+  } catch (err) {
+    console.error(err);
+    showError('⚠️ Daten konnten nicht geladen werden. Prüfe, ob das Google Sheet auf "Jeder mit Link kann bearbeiten/anzeigen" freigegeben ist und die SHEET_ID korrekt ist.');
+    statusEl.textContent = 'Fehler beim Laden';
+  }
+}
+
+function renderMarkers() {
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+  const bounds = [];
+  harbors.forEach(h => {
+    if (!isNaN(h.lat) && !isNaN(h.lon)) {
+      const marker = L.marker([h.lat, h.lon]).addTo(map);
+      marker.bindPopup(`<strong>${escapeHtml(h.name)}</strong>${h.land ? '<br>' + escapeHtml(h.land) : ''}`);
+      marker.on('click', () => showDetail(h));
+      markers.push(marker);
+      bounds.push([h.lat, h.lon]);
+    }
+  });
+  if (bounds.length) {
+    map.fitBounds(bounds, { padding: [30, 30], maxZoom: 12 });
+  }
+}
+
+function renderList(items) {
+  if (!items.length) {
+    listEl.innerHTML = '<div class="empty">Keine Häfen gefunden. Trage Daten im Google Sheet ein.</div>';
+    return;
+  }
+  listEl.innerHTML = '';
+  items
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name, 'de'))
+    .forEach(h => {
+      const div = document.createElement('div');
+      div.className = 'item';
+      div.innerHTML = `<div class="name">${escapeHtml(h.name)}</div><div class="sub">${escapeHtml(h.land)}</div>`;
+      div.addEventListener('click', () => {
+        showDetail(h);
+        if (!isNaN(h.lat) && !isNaN(h.lon)) {
+          map.setView([h.lat, h.lon], 14);
+        }
+      });
+      listEl.appendChild(div);
+    });
+}
+
+function showDetail(h) {
+  detailEl.innerHTML = `
+    <div id="detailHeader">
+      <h2>${escapeHtml(h.name)}</h2>
+      <button id="closeDetail">✕</button>
+    </div>
+    ${h.land ? `<div class="row"><span class="label">Land:</span> ${escapeHtml(h.land)}</div>` : ''}
+    ${h.telefon ? `<div class="row"><span class="label">Hafenmeister:</span> <a href="tel:${escapeHtml(h.telefon.replace(/\\s/g,''))}">${escapeHtml(h.telefon)}</a></div>` : ''}
+    ${h.reservierung ? `<div class="row"><span class="label">Reservierung:</span> ${escapeHtml(h.reservierung)}</div>` : ''}
+    ${h.reservierungslink ? `<div class="row"><a href="${escapeHtml(h.reservierungslink)}" target="_blank" rel="noopener">Reservierungslink öffnen ↗</a></div>` : ''}
+    ${h.tiefe ? `<div class="row"><span class="label">Wassertiefe:</span> ${escapeHtml(h.tiefe)} m${h.tiefeUpdate ? ' (Stand: ' + escapeHtml(h.tiefeUpdate) + ')' : ''}</div>` : ''}
+    ${h.notizen ? `<div class="row"><span class="label">Notizen:</span> ${escapeHtml(h.notizen)}</div>` : ''}
+    ${h.eingetragenVon ? `<div class="row" style="color:#888; font-size:0.8rem;">Eingetragen von ${escapeHtml(h.eingetragenVon)}</div>` : ''}
+  `;
+  detailEl.classList.add('open');
+  document.getElementById('closeDetail').addEventListener('click', () => {
+    detailEl.classList.remove('open');
+  });
+}
+
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
+}
+
+searchEl.addEventListener('input', () => {
+  const q = searchEl.value.trim().toLowerCase();
+  const filtered = q
+    ? harbors.filter(h => h.name.toLowerCase().includes(q))
+    : harbors;
+  renderList(filtered);
+});
+
+document.getElementById('refreshBtn').addEventListener('click', loadData);
+
+loadData();
+</script>
+</body>
+</html>
